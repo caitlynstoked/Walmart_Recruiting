@@ -1,0 +1,94 @@
+library(tidyverse)
+library(tidymodels)
+library(vroom)
+library(lubridate)
+library(dplyr)
+library(glmnet)
+library(rpart)
+library(agua)
+library(suncalc)
+
+
+cherry <- vroom("Bike Data/cherry-blossoms_fig-1.csv")
+
+raw_cherry <- vroom::vroom("Bike Data/cherry-blossoms_fig-1.csv", skip = 6)
+
+# Clean column names
+cherry_clean <- raw_cherry %>%
+  rename(
+    year = Year,
+    yoshino_peak = `Yoshino peak bloom date`,
+    festival_start = `Cherry blossom festival start date`,
+    festival_duration = `Cherry blossom festival duration`
+  ) %>%
+  mutate(
+    # Ensure numeric columns
+    across(c(yoshino_peak, festival_start, festival_duration), as.numeric)
+  ) %>%
+  filter(!is.na(year)) # drop any weird extra rows
+
+# Preview cleaned data
+tail(cherry_clean)
+
+train <- vroom("Bike Data/train.csv") %>%
+  mutate(count = log1p(count)) %>%     # log-transform target
+  select(-casual, -registered) 
+test  <- vroom("Bike Data/test.csv")
+
+#===============================
+# Feature Engineering Recipe
+#===============================
+bike_recipe <- recipe(count ~ ., data = train) %>%
+  step_mutate(weather = ifelse(weather == 4, 3, weather),
+              weekend = ifelse(wday(datetime) %in% c(1,7), 1, 0),
+              rush_hour = ifelse(hour(datetime) %in% c(7:9, 16:19), 1, 0),
+              # Cherry Blossom Festival Flag
+              cherryfest = ifelse(
+                (year(datetime) == 2011 & date(datetime) >= as.Date("2011-03-26") & date(datetime) <= as.Date("2011-04-10")) |
+                  (year(datetime) == 2012 & date(datetime) >= as.Date("2012-03-20") & date(datetime) <= as.Date("2012-04-27")),
+                1, 0),
+              dusk_times = getSunlightTimes(
+                date = seq(min(as.Date(datetime)), max(as.Date(datetime)), by = "1 day"),
+                lat = 38.8893,
+                lon = -77.0502,
+                keep = c("dusk")
+              )) %>%
+  select(date, dusk)
+  step_date(datetime, features = c('month', 'year', 'dow')) |> 
+  step_time(datetime, features = "hour") |> 
+  step_rm(datetime) |> 
+  step_interact(terms = ~ temp:humidity + temp:windspeed + season:humidity) |> 
+  step_poly(temp, humidity, degree = 2) |> 
+  step_dummy(all_nominal_predictors()) |> 
+  step_normalize(all_numeric_predictors())
+
+
+h2o::h2o.init()
+## Define the model
+## max_runtime_secs = how long to let h2o.ai run
+## max_models = how many models to stack
+auto_model <- auto_ml() %>%
+  set_engine("h2o", max_runtime_secs=180, max_models=5) %>%
+  set_mode("regression")
+## Combine into Workflow
+automl_wf <- workflow() %>%
+  add_recipe(bike_recipe) %>%
+  add_model(auto_model) %>%
+  fit(data=train)
+## Predict
+preds <- predict(automl_wf, new_data = test)
+
+kaggle_h20 <- preds %>%
+  bind_cols(test) %>%
+  select(datetime, .pred) %>%
+  rename(count = .pred) %>%
+  mutate(
+    count = exp(count),                    # back-transform
+    count = pmax(0, count),
+    datetime = format(datetime, "%Y-%m-%d %H:%M:%S")
+  )
+
+
+
+vroom_write(kaggle_h20, file = "./PredsPreds.csv", delim = ",")
+

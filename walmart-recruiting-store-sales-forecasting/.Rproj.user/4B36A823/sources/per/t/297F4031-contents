@@ -1,0 +1,248 @@
+#===============================
+# Libraries
+#===============================
+
+library(tidyverse)
+library(tidymodels)
+library(vroom)
+library(lubridate)
+library(dplyr)
+library(glmnet)
+library(rpart)
+
+#===============================
+# Load Data
+#===============================
+train <- vroom("Bike Data/train.csv") %>%
+  select(-casual, -registered)   # remove leakage columns
+test  <- vroom("Bike Data/test.csv")
+
+#===============================
+# Cleaning
+#===============================
+# Change count to log(count) in training only
+train <- train %>%
+  mutate(count = log(count))
+
+#===============================
+# Feature Engineering Recipe
+#===============================
+bike_recipe <- recipe(count ~ ., data = train) %>%
+  
+  # 1. Recode weather "4" -> "3" and make factor
+  step_mutate(weather = ifelse(weather == 4, 3, weather)) %>%
+  step_mutate(weather = as.factor(weather)) %>%
+  
+  # 2. Extract hour from datetime
+  step_mutate(hour = lubridate::hour(datetime)) %>%
+  
+  # 3. Make season a factor
+  step_mutate(season = as.factor(season)) %>%
+  
+  # 4. Extra: weekday
+  step_mutate(wday = lubridate::wday(datetime, label = TRUE)) %>%
+  
+  # Drop raw datetime
+  step_rm(datetime) %>%
+  
+  # Encode all categorical variables
+  step_dummy(all_nominal_predictors()) %>%
+  
+  # Normalize numeric predictors
+  step_normalize(all_numeric_predictors())
+
+# Prep & bake to check dataset
+bike_recipe_prep <- prep(bike_recipe)
+train_baked <- bake(bike_recipe_prep, new_data = train)
+test_baked  <- bake(bike_recipe_prep, new_data = test)
+
+# Show first 5 rows
+head(train_baked, 5)
+
+#===============================
+# Linear Regression Model
+#===============================
+lin_model <- linear_reg() %>%
+  set_engine("lm") %>%
+  set_mode("regression")
+
+bike_wf <- workflow() %>%
+  add_recipe(bike_recipe) %>%
+  add_model(lin_model) %>%
+  fit(data = train)
+
+lin_preds <- predict(bike_wf, new_data = test)
+
+kaggle_linear <- lin_preds %>%
+  bind_cols(test) %>%
+  select(datetime, .pred) %>%
+  rename(count = .pred) %>%
+  mutate(
+    count = exp(count),                    # back-transform
+    count = pmax(0, count),
+    datetime = format(datetime, "%Y-%m-%d %H:%M:%S")
+  )
+
+vroom_write(kaggle_linear, file = "./LinearPreds.csv", delim = ",")
+
+#===============================
+# Penalized Regression Section
+#===============================
+penalized_model <- linear_reg(
+  penalty = tune(),   # λ
+  mixture = tune()    # α
+) %>%
+  set_engine("glmnet") %>%
+  set_mode("regression")
+
+penalized_wf <- workflow() %>%
+  add_recipe(bike_recipe) %>%
+  add_model(penalized_model)
+
+# 5-fold cross-validation
+set.seed(123)
+folds <- vfold_cv(train, v = 5)
+
+# Grid of tuning values (regular grid)
+grid <- grid_regular(
+  penalty(),
+  mixture(),
+  levels = 6          # 6x6 = 36 combinations
+)
+
+# Tune the model
+tuned_results <- tune_grid(
+  penalized_wf,
+  resamples = folds,
+  grid = grid,
+  metrics = metric_set(rmse, mae)
+)
+
+# Plot RMSE results
+tuned_results %>%
+  collect_metrics() %>%
+  filter(.metric == "rmse") %>%
+  ggplot(aes(x = penalty, y = mean, color = factor(mixture))) +
+  geom_line() +
+  scale_x_log10() +
+  labs(title = "Penalized Regression Tuning",
+       x = "Penalty (log scale)", y = "Mean RMSE",
+       color = "Mixture")
+
+# Select best parameters
+best_params <- select_best(tuned_results, metric = "rmse")
+
+# Finalize workflow with best params
+final_wf <- finalize_workflow(penalized_wf, best_params)
+
+# Fit final penalized model
+final_fit <- fit(final_wf, data = train)
+
+# Predict test set
+penalized_preds <- predict(final_fit, new_data = test)
+
+kaggle_penalized <- penalized_preds %>%
+  bind_cols(test) %>%
+  select(datetime, .pred) %>%
+  rename(count = .pred) %>%
+  mutate(
+    count = exp(count),                     # back-transform
+    count = pmax(0, count),
+    datetime = format(datetime, "%Y-%m-%d %H:%M:%S")
+  )
+
+#===============================
+# Regression Tree Section
+#===============================
+# 1. Define regression tree model with tunable hyperparameters
+tree_model <- decision_tree(
+  tree_depth = tune(),        # Maximum depth of tree
+  cost_complexity = tune(),   # Complexity parameter (pruning)
+  min_n = tune()              # Minimum data points per node
+) %>%
+  set_engine("rpart") %>%
+  set_mode("regression")
+
+# 2. Add model to workflow
+tree_wf <- workflow() %>%
+  add_recipe(bike_recipe) %>%
+  add_model(tree_model)
+
+# 3. Cross-validation folds (reuse earlier folds if desired)
+set.seed(123)
+folds <- vfold_cv(train, v = 5)
+
+# 4. Define a grid of tuning values
+tree_grid <- grid_regular(
+  tree_depth(range = c(2, 15)),        # shallow to deep
+  cost_complexity(),
+  min_n(range = c(2, 20)),
+  levels = 4                           # 4x4x4 = 64 models
+)
+
+# 5. Tune hyperparameters
+tree_results <- tune_grid(
+  tree_wf,
+  resamples = folds,
+  grid = tree_grid,
+  metrics = metric_set(rmse, mae)
+)
+
+# Optional: Inspect tuning results
+collect_metrics(tree_results)
+
+# 6. Select best parameters
+best_tree <- select_best(tree_results, metric = "rmse")
+
+# 7. Finalize workflow with best params
+final_tree_wf <- finalize_workflow(tree_wf, best_tree)
+
+# 8. Fit final regression tree model
+final_tree_fit <- fit(final_tree_wf, data = train)
+
+# 9. Predict test set
+tree_preds <- predict(final_tree_fit, new_data = test)
+
+
+##Regression Trees##
+my_mod <- rand_forest(mtry = tune(),
+                      min_n=tune(),
+                      trees=500) %>% #Type of model
+  set_engine("ranger") %>% # What R function to use
+  set_mode("regression")
+
+#create workflow with model & recipe
+glimpse(train_baked)
+#set up grid of tuning values
+mygrid <- grid_regular(mtry(range=c(1,19)),
+                       min_n(),
+                       levels=)
+
+kaggle_submission <- predict(final_fit, new_data = test) %>%
+  bind_cols(test %>% select(datetime)) %>%
+  rename(count = .pred) %>%
+  mutate(
+    count = exp(count),                     # back-transform log(count)
+    count = pmax(0, count),                 # no negatives
+    datetime = format(datetime, "%Y-%m-%d %H:%M:%S")
+  )
+
+
+kaggle_tree <- tree_preds %>%
+  bind_cols(test) %>%
+  select(datetime, .pred) %>%
+  rename(count = .pred) %>%
+  mutate(
+    count = exp(count),                     # back-transform log(count)
+    count = pmax(0, count),                 # no negatives
+    datetime = format(datetime, "%Y-%m-%d %H:%M:%S")
+  )
+
+#####Random Forest#####
+
+
+vroom_write(kaggle_tree, file = "./TreePreds.csv", delim = ",")
+vroom_write(kaggle_submission, file = "./RegressTreePreds.csv", delim = ",")
+
+
+

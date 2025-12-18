@@ -1,0 +1,224 @@
+library(tidyverse)
+library(tidymodels)
+library(vroom)
+library(lubridate)
+library(janitor)
+library(ranger)
+
+# --- 1. Load data ---------------------------------------------------------
+train <- vroom("train.csv")
+# %>% 
+#   # clean_names() %>% 
+#   mutate(open_date = mdy(open_date))
+
+test <- vroom("test.csv") 
+# %>% 
+#   # clean_names() %>% 
+#   mutate(open_date = mdy(open_date))
+
+walmart_departments <- tibble::tribble(
+  ~Dept, ~Name,
+  1,  "Candy & Tobacco",
+  2,  "Heath & Beauty Aids",
+  3,  "Stationery",
+  4,  "Household Paper",
+  5,  "Media & Gaming",
+  6,  "Cameras & Supplies",
+  7,  "Toys",
+  8,  "Pets & Supplies",
+  9,  "Sporting Goods",
+  10, "Automotive",
+  11, "Hardware",
+  12, "Paint & Accessories",
+  13, "Household Chemicals",
+  14, "Cook & Dine",
+  15, "Health and Wellness Clinics",
+  16, "Lawn & Garden",
+  17, "Home Decor",
+  18, "Seasonal",
+  19, "Piece Goods & Crafts",
+  20, "Bath & Shower",
+  21, "Books & Magazines",
+  22, "Bedding",
+  23, "Menswear",
+  24, "Boyswear",
+  25, "Shoes",
+  26, "Infant Apparel",
+  27, "Family Socks",
+  28, "Hosiery",
+  29, "Sleepwear",
+  30, "Foundations",
+  31, "Accessories",
+  32, "Jewelry",
+  33, "Griswold",
+  34, "Ladies Apparel",
+  35, "Plus Sizes & Maternity",
+  36, "Ladies Outerwear",
+  37, "Auto Service",
+  38, "Pharmacy Rx",
+  39, "Consumer Service",
+  40, "OTC Pharmacy",
+  42, "Automotive SubDepartment",
+  46, "Cosmetics & Skincare",
+  49, "Optical",
+  50, "Optical",
+  56, "Horticulture",
+  58, "Wireless Service, Inc.",
+  60, "Concept Stores",
+  65, "Gasoline",
+  67, "Celebration",
+  71, "Furniture",
+  72, "Electronics",
+  74, "Home Management",
+  75, "Fixtures",
+  77, "Large Household Goods",
+  79, "Infant Consumables Hardlines",
+  80, "Service Deli",
+  81, "Commercial Bread",
+  82, "Impulse Merchandise",
+  84, "Balloons & Flowers",
+  85, "One-Hour Photo",
+  86, "Walmart Services",
+  87, "Wireless",
+  88, "PMDC Signing",
+  89, "Travel",
+  90, "Dairy",
+  91, "Frozen",
+  92, "Grocery",
+  93, "Meat",
+  94, "Produce",
+  95, "DSD Grocery",
+  96, "Liquor",
+  97, "Wall Deli",
+  98, "Bakery",
+  99, "Office & Store"
+)
+
+
+
+features2 <- vroom("features.csv") %>%
+  mutate(across(starts_with("MarkDown"), ~ replace_na(.x, 0)))
+
+train_joined <- train |> 
+  left_join(features, by = c("Store", "Date"))
+            
+colnames(train_joined)
+
+
+#mixed<-left_join(features2,train, by=c("Store", "Store"))
+
+library(tidyverse)
+
+top_dept <- train_joined %>%
+  group_by(Dept) %>%
+  summarize(total_sales = sum(Weekly_Sales, na.rm = TRUE)) %>%
+  arrange(desc(total_sales)) %>%
+  slice(1) %>%
+  pull(Dept)
+top_dept
+train_joined %>%
+  ggplot(aes(x = Date, y = Weekly_Sales, group = Dept)) +
+  geom_line(color = "gray10", alpha = 0.6) +   # all lines gray
+  geom_line(
+    data = train_joined %>% filter(Dept == top_dept),
+    aes(x = Date, y = Weekly_Sales),
+    color = "gray90",
+    linewidth = 1.1
+  ) +
+  labs(
+    title = paste("Weekly Sales Over Time by Department\nTop Dept Highlighted:", top_dept),
+    x = "Date",
+    y = "Weekly Sales"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 14, face = "bold"),
+    panel.grid.minor = element_blank()
+  )
+
+dept_spread <- train_joined %>%
+  group_by(Dept) %>%
+  summarize(
+    max_sales = max(Weekly_Sales, na.rm = TRUE),
+    min_sales = min(Weekly_Sales, na.rm = TRUE),
+    spread = max_sales - min_sales
+  ) %>%
+  arrange(desc(spread))
+
+dept_spread
+
+
+head(train)
+head(features)
+
+trainNA<-train %>%
+  summarise(across(everything(), list(
+    na_count = ~sum(is.na(.)),
+    zero_count = ~sum(. == 0, na.rm = TRUE)
+  )))
+
+featureNA<- features %>%
+  summarise(across(everything(), list(
+    na_count = ~sum(is.na(.)),
+    zero_count = ~sum(. == 0, na.rm = TRUE)
+  )))
+featureNOTNA<- features %>%
+  summarise(across(everything(), list(
+    NOTna_count = ~sum(!is.na(.)),
+    zero_count = ~sum(. == 0, na.rm = TRUE)
+  )))
+
+trainNA
+featureNA
+featureNOTNA
+get_modes <- function(df) {
+  mode_fun <- function(x) {
+    x <- x[!is.na(x)]                # remove NAs
+    if (length(x) == 0) return(NA)   # if all NA
+    ux <- unique(x)
+    ux[which.max(tabulate(match(x, ux)))]
+  }
+  
+  summarise(df, across(everything(), mode_fun))
+}
+get_modes(train)
+get_modes(features)
+get_means <- function(df) {
+  summarise(df, across(where(is.numeric), ~mean(.x, na.rm = TRUE)))
+}
+get_means(train)
+get_means(features)
+## Libraries I need
+library(tidyverse)
+library(vroom)
+library(tidymodels)
+library(DataExplorer)
+
+## Read in the Data
+train <- vroom("./train.csv")
+test <- vroom("./test.csv")
+features <- vroom("./features.csv")
+
+#########
+## EDA ##
+#########
+plot_missing(features)
+plot_missing(test)
+
+### Impute Missing Markdowns
+features <- features %>%
+  mutate(across(starts_with("MarkDown"), ~ replace_na(., 0))) %>%
+  mutate(across(starts_with("MarkDown"), ~ pmax(., 0))) %>%
+  mutate(
+    MarkDown_Total = rowSums(across(starts_with("MarkDown")), na.rm = TRUE),
+    MarkDown_Flag = if_else(MarkDown_Total > 0, 1, 0),
+    MarkDown_Log   = log1p(MarkDown_Total)
+  ) %>%
+  select(-MarkDown1, -MarkDown2, -MarkDown3, -MarkDown4, -MarkDown5)
+
+## Impute Missing CPI and Unemployment
+feature_recipe <- recipe(~., data=features) %>%
+  step_mutate(DecDate = decimal_date(Date)) %>%
+  step_impute_bag(CPI, Unemployment,
+                  impute_with = imp_vars(DecDate, Store))
+imputed_features <- juice(prep(feature_recipe))

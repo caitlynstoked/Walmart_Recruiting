@@ -1,0 +1,28 @@
+{
+    "id": "3A4765F0",
+    "path": null,
+    "project_path": null,
+    "type": "object_explorer",
+    "hash": "0",
+    "contents": "",
+    "dirty": false,
+    "created": 1764002386600.0,
+    "source_on_save": false,
+    "relative_order": 5,
+    "properties": {
+        "id": "6c3afa2eb447418fa3b525a3b5c6eaf3",
+        "name": "feature_recipe",
+        "title": "feature_recipe",
+        "language": "R",
+        "source_window_id": "",
+        "Source": "Source"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 0,
+    "encoding": "",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1764002386600,
+    "read_only": false,
+    "read_only_alternatives": []
+}

@@ -1,0 +1,152 @@
+library(tidyverse)
+library(vroom)
+library(lubridate)
+library(tidymodels)
+library(suncalc)
+library(h2o)
+
+#===============================
+# Custom Step: step_dusk
+#===============================
+step_dusk <- function(recipe, date_col, lat, lon,
+                      role = "predictor", trained = FALSE,
+                      columns = NULL, skip = FALSE,
+                      id = rand_id("dusk")) {
+  add_step(
+    recipe,
+    step_dusk_new(
+      date_col = rlang::ensym(date_col),  # use symbol instead of quosure
+      lat = lat,
+      lon = lon,
+      trained = trained,
+      columns = columns,
+      role = role,
+      skip = skip,
+      id = id
+    )
+  )
+}
+
+step_dusk_new <- function(date_col, lat, lon, trained, columns, role, skip, id) {
+  step(
+    subclass = "dusk",
+    date_col = date_col,
+    lat = lat,
+    lon = lon,
+    trained = trained,
+    columns = columns,
+    role = role,
+    skip = skip,
+    id = id
+  )
+}
+
+prep.step_dusk <- function(x, training, info = NULL, ...) {
+  colname <- rlang::as_name(x$date_col)
+  step_dusk_new(
+    date_col = x$date_col,
+    lat = x$lat,
+    lon = x$lon,
+    trained = TRUE,
+    columns = colname,
+    role = x$role,
+    skip = x$skip,
+    id = x$id
+  )
+}
+
+bake.step_dusk <- function(object, new_data, ...) {
+  col_name <- object$columns
+  dates <- as.Date(new_data[[col_name]])
+  
+  dusk_times <- getSunlightTimes(
+    date = unique(dates),
+    lat = object$lat,
+    lon = object$lon
+  ) %>%
+    select(date, dusk)
+  
+  # Clean join (no quosures)
+  new_data <- new_data %>%
+    dplyr::left_join(dusk_times, by = setNames("date", col_name))
+  
+  # (Optional but smart) — convert dusk to numeric minutes since midnight
+  new_data <- new_data %>%
+    mutate(
+      dusk = as.numeric(format(dusk, "%H")) * 60 +
+        as.numeric(format(dusk, "%M"))
+    )
+  
+  new_data
+}
+
+
+
+#===============================
+# Load and preprocess data
+#===============================
+train <- vroom("Bike Data/train.csv") %>%
+  mutate(count = log1p(count)) %>%     # log-transform target
+  select(-casual, -registered) 
+test  <- vroom("Bike Data/test.csv")
+
+#===============================
+# Feature Engineering Recipe
+#===============================
+bike_recipe <- recipe(count ~ ., data = train) %>%
+  step_mutate(datetime = as.POSIXct(datetime)) %>%
+  step_mutate(
+    weather = ifelse(weather == 4, 3, weather),
+    weekend = ifelse(lubridate::wday(as.POSIXct(datetime)) %in% c(1, 7), 1, 0),
+    rush_hour = ifelse(lubridate::hour(as.POSIXct(datetime)) %in% c(7:9, 16:19), 1, 0),
+    cherryfest = ifelse(
+      (lubridate::year(as.POSIXct(datetime)) == 2011 &
+         lubridate::date(as.POSIXct(datetime)) >= as.Date("2011-03-26") &
+         lubridate::date(as.POSIXct(datetime)) <= as.Date("2011-04-10")) |
+        (lubridate::year(as.POSIXct(datetime)) == 2012 &
+           lubridate::date(as.POSIXct(datetime)) >= as.Date("2012-03-20") &
+           lubridate::date(as.POSIXct(datetime)) <= as.Date("2012-04-27")),
+      1, 0)
+  ) %>%
+  step_mutate(date = as.Date(datetime)) %>%
+  step_dusk(date, lat = 38.8893, lon = -77.0502) %>%
+  step_date(datetime, features = c("month", "year", "dow")) %>%
+  step_time(datetime, features = "hour") %>%
+  step_rm(datetime, date) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_interact(terms = ~ temp:humidity + temp:windspeed + season:humidity) %>%
+  step_poly(temp, humidity, degree = 2) %>%
+  step_normalize(all_numeric_predictors())
+
+
+
+#===============================
+# Model & Workflow
+#===============================
+h2o::h2o.init()
+
+auto_model <- auto_ml() %>%
+  set_engine("h2o", max_runtime_secs = 180, max_models = 5) %>%
+  set_mode("regression")
+
+automl_wf <- workflow() %>%
+  add_recipe(bike_recipe) %>%
+  add_model(auto_model) %>%
+  fit(data = train)
+
+#===============================
+# Predictions
+#===============================
+preds <- predict(automl_wf, new_data = test)
+
+kaggle_h2o <- preds %>%
+  bind_cols(test) %>%
+  select(datetime, .pred) %>%
+  rename(count = .pred) %>%
+  mutate(
+    count = expm1(count),
+    count = pmax(0, count),
+    datetime = format(datetime, "%Y-%m-%d %H:%M:%S")
+  )
+
+vroom_write(kaggle_h2o, file = "./PredsPreds2.csv", delim = ",")
